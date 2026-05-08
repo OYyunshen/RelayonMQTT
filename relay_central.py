@@ -29,6 +29,7 @@ import signal
 import socket
 import sys
 import time
+import threading
 
 from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
@@ -37,7 +38,7 @@ from sniffle.sniffle_hw import SniffleHW, BLE_ADV_AA, SnifferMode
 from sniffle.packet_decoder import (
     PacketMessage, DPacketMessage, DataMessage, LlDataContMessage,
     AdvaMessage, AdvDirectIndMessage, AdvExtIndMessage, ScanRspMessage,
-    ConnectIndMessage, str_mac2
+    ConnectIndMessage, LlControlMessage, str_mac2
 )
 from sniffle.sniffer_state import StateMessage, SnifferState
 from sniffle.measurements import MeasurementMessage
@@ -83,6 +84,7 @@ class RelayCentral:
         self.is_connected = False
         self.cur_aa = 0
         self.mac_bytes = [int(h, 16) for h in reversed(args.target.split(":"))]
+        self.hw_lock = threading.Lock()
 
     def run(self):
         """Main entry point."""
@@ -98,9 +100,11 @@ class RelayCentral:
         """Initialize Sniffle hardware for scanning."""
         self.hw = SniffleHW(self.args.serport)
         self.hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
+        self.hw.cmd_pause_done(True)
         self.hw.cmd_follow(False)
         self.hw.cmd_rssi(-128)
         self.hw.cmd_mac()
+        self.hw.cmd_auxadv(False)
         self.hw.random_addr()
         self.hw.cmd_scan()
         self.hw.mark_and_flush()
@@ -144,10 +148,10 @@ class RelayCentral:
         """Check if decoded packet is from our target."""
         if isinstance(dpkt, AdvaMessage) or isinstance(dpkt, AdvDirectIndMessage):
             adva = str_mac2(dpkt.AdvA, dpkt.TxAdd)
-            return self.args.target in adva
+            return self.args.target.upper() in adva.upper()
         if isinstance(dpkt, AdvExtIndMessage) and dpkt.AdvA is not None:
             adva = str_mac2(dpkt.AdvA, dpkt.TxAdd)
-            return self.args.target in adva
+            return self.args.target.upper() in adva.upper()
         return False
 
     def _setup_mqtt(self):
@@ -206,7 +210,16 @@ class RelayCentral:
         event = int(event_hex, 16)
         llid = body[0] & 3
         pdu = body[2:]
-        self.hw.cmd_transmit(llid, pdu, event)
+
+        # Filter out LL control PDUs with instants that may have expired
+        pkt = DPacketMessage.from_body(body, True)
+        if isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]:
+            if not self.args.quiet:
+                print(f"  >> Filtered LL control with instant (opcode=0x{pkt.opcode:02x})")
+            return
+
+        with self.hw_lock:
+            self.hw.cmd_transmit(llid, pdu, event)
         if not self.args.quiet:
             print(f"  >> BLE TX: LLID={llid} len={len(pdu)} event={event}")
 
@@ -243,8 +256,8 @@ class RelayCentral:
         # Reconfigure hardware for connection initiation
         self.hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
         self.hw.cmd_pause_done(True)
-        self.hw.cmd_follow(True)
-        self.hw.cmd_rssi()
+        self.hw.cmd_follow(False)
+        self.hw.cmd_rssi(-128)
         self.hw.cmd_mac(self.mac_bytes, False)
         self.hw.cmd_auxadv(False)
         self.hw.cmd_setaddr(self.conn_req.InitA, bool(self.conn_req.TxAdd))
@@ -253,8 +266,9 @@ class RelayCentral:
         self.hw.mark_and_flush()
 
         # Initiate connection using parameters from the relayed CONNECT_IND
+        targ_random = bool(self.target_adva.adv.TxAdd)
         self.hw.initiate_conn(
-            self.mac_bytes, False,
+            self.mac_bytes, targ_random,
             self.conn_req.Interval, self.conn_req.Latency
         )
 
@@ -275,7 +289,8 @@ class RelayCentral:
         """Main BLE receive and forward loop."""
         while True:
             try:
-                msg = self.hw.recv_and_decode()
+                with self.hw_lock:
+                    msg = self.hw.recv_and_decode()
                 if isinstance(msg, PacketMessage):
                     self._process_packet(msg)
                 elif isinstance(msg, StateMessage):

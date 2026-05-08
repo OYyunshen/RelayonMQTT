@@ -23,6 +23,7 @@ import signal
 import socket
 import sys
 import time
+import threading
 
 from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
@@ -30,7 +31,7 @@ from paho.mqtt.enums import CallbackAPIVersion
 from sniffle.sniffle_hw import SniffleHW, BLE_ADV_AA, SnifferMode
 from sniffle.packet_decoder import (
     PacketMessage, DPacketMessage, DataMessage, LlDataContMessage,
-    ConnectIndMessage
+    ConnectIndMessage, LlControlMessage
 )
 from sniffle.sniffer_state import StateMessage, SnifferState
 from sniffle.measurements import MeasurementMessage
@@ -54,6 +55,7 @@ class RelayPeripheral:
         self.adv_mac_bytes = None
         self.got_adv = False
         self.got_rsp = False
+        self.hw_lock = threading.Lock()
 
     def run(self):
         """Main entry point."""
@@ -130,7 +132,16 @@ class RelayPeripheral:
         event = int(event_hex, 16)
         llid = body[0] & 3
         pdu = body[2:]
-        self.hw.cmd_transmit(llid, pdu, event)
+
+        # Filter out LL control PDUs with instants that may have expired
+        pkt = DPacketMessage.from_body(body, True)
+        if isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]:
+            if not self.args.quiet:
+                print(f"  >> Filtered LL control with instant (opcode=0x{pkt.opcode:02x})")
+            return
+
+        with self.hw_lock:
+            self.hw.cmd_transmit(llid, pdu, event)
         if not self.args.quiet:
             print(f"  >> BLE TX: LLID={llid} len={len(pdu)} event={event}")
 
@@ -159,7 +170,6 @@ class RelayPeripheral:
         self.hw.cmd_interval_preload()
         self.hw.cmd_phy_preload()
         self.hw.mark_and_flush()
-        self.hw.mark_and_flush()
 
         if self.args.output:
             self.pcwriter = PcapBleWriter(self.args.output)
@@ -173,7 +183,8 @@ class RelayPeripheral:
         """Main BLE receive and forward loop."""
         while True:
             try:
-                msg = self.hw.recv_and_decode()
+                with self.hw_lock:
+                    msg = self.hw.recv_and_decode()
                 if isinstance(msg, PacketMessage):
                     self._process_packet(msg)
                 elif isinstance(msg, StateMessage):
