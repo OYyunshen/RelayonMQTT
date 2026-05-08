@@ -153,6 +153,7 @@ python relay_peripheral.py -B broker.example.com -s /dev/ttyACM1 -o peripheral_c
 | "Waiting for advertisement data..." hangs | Device-side not running or broker unreachable | Check broker connectivity; start device-side first |
 | Peripheral-side never sees phone connect | Phone not in range, or advertisement data incorrect | Ensure phone BLE scanning is active; check target MAC |
 | "HW packet error" messages | Sniffle firmware issue or USB disconnect | Reconnect board, re-flash firmware |
+| Serial port "resource busy" on Linux | ModemManager is probing the serial device | `sudo systemctl stop ModemManager && sudo systemctl disable ModemManager` |
 | High latency / dropped packets | Network latency to broker | Use broker geographically close to both nodes |
 
 ## Limitations

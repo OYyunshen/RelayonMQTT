@@ -153,6 +153,7 @@ python relay_peripheral.py -B broker.example.com -s /dev/ttyACM1 -o peripheral_c
 | "Waiting for advertisement data..." 一直挂起 | 设备侧未启动或 broker 不可达 | 检查 broker 连通性；先启动设备侧 |
 | 手机侧看不到手机连接 | 手机不在范围内，或广播数据不正确 | 确保手机蓝牙扫描开启；检查目标 MAC |
 | "HW packet error" 消息 | Sniffle 固件问题或 USB 断开 | 重新插拔开发板，重新刷固件 |
+| Linux 串口 "resource busy" | ModemManager 正在探测串口设备 | `sudo systemctl stop ModemManager && sudo systemctl disable ModemManager` |
 | 高延迟/丢包 | 到 broker 的网络延迟过大 | 使用地理位置靠近两个节点的 broker |
 
 ## 限制
