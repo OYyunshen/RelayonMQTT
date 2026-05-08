@@ -276,7 +276,14 @@ Examples:
     def sigint_handler(sig, frame):
         print("\n[*] Interrupted, cleaning up...")
         if relay.hw:
-            relay.hw.cmd_chan_aa_phy()
+            try:
+                relay.hw.cmd_chan_aa_phy()
+                relay.hw.ser.close()
+            except Exception:
+                pass
+        if relay.mqtt:
+            relay.mqtt.loop_stop()
+            relay.mqtt.disconnect()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, sigint_handler)
