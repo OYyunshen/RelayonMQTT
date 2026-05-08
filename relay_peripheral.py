@@ -62,11 +62,24 @@ class RelayPeripheral:
 
     def run(self):
         """Main entry point."""
+        self._check_hardware()
         self._setup_mqtt()
         self._wait_for_advertisement()
         self._setup_hardware()
         self._start_advertising()
         self._relay_loop()
+
+    def _check_hardware(self):
+        """Quick check that the Sniffle board is accessible."""
+        print("[*] Checking Sniffle board...")
+        try:
+            hw = SniffleHW(self.args.serport)
+            hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
+            hw.ser.close()
+            print("[+] Sniffle board OK")
+        except Exception as e:
+            print(f"[-] Sniffle board check failed: {e}")
+            sys.exit(1)
 
     def _setup_mqtt(self):
         """Connect to MQTT broker and subscribe to the device-side topic."""
