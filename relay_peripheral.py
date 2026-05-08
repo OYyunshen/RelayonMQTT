@@ -24,6 +24,7 @@ import socket
 import sys
 import time
 import threading
+from collections import deque
 
 from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
@@ -56,6 +57,7 @@ class RelayPeripheral:
         self.got_adv = False
         self.got_rsp = False
         self.peripheral_ready = False
+        self.pending_data = deque()
         self.hw_lock = threading.Lock()
 
     def run(self):
@@ -126,8 +128,15 @@ class RelayPeripheral:
 
     def _handle_data_message(self, data: str):
         """Forward data from device-side relay to BLE."""
-        if self.hw is None or not self.peripheral_ready:
+        if self.hw is None:
             return
+        if not self.peripheral_ready:
+            self.pending_data.append(data)
+            return
+        self._forward_data(data)
+
+    def _forward_data(self, data: str):
+        """Parse and transmit a data message to BLE."""
         event_hex, body_hex = data.split(":", 1)
         body = bytes.fromhex(body_hex)
         if len(body) < 2:
@@ -211,6 +220,11 @@ class RelayPeripheral:
                 self._publish(f"con:{dpkt.body.hex()}")
                 self.peripheral_ready = True
                 print(f"[+] Central connected! Forwarding CONNECT_IND to device-side")
+                # Replay queued data packets
+                if self.pending_data:
+                    print(f"[*] Replaying {len(self.pending_data)} queued packets...")
+                    while self.pending_data:
+                        self._forward_data(self.pending_data.popleft())
             pdu_type = 0
 
         elif isinstance(dpkt, DataMessage):

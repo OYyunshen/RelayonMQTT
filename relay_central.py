@@ -30,6 +30,7 @@ import socket
 import sys
 import time
 import threading
+from collections import deque
 
 from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
@@ -83,6 +84,7 @@ class RelayCentral:
         self.conn_req = None
         self.is_connected = False
         self.central_ready = False
+        self.pending_data = deque()
         self.cur_aa = 0
         self.mac_bytes = [int(h, 16) for h in reversed(args.target.split(":"))]
         self.hw_lock = threading.Lock()
@@ -202,8 +204,16 @@ class RelayCentral:
 
     def _handle_data_message(self, data: str):
         """Forward data from phone-side relay to BLE peripheral."""
-        if self.hw is None or not self.central_ready:
+        if self.hw is None:
             return
+        if not self.central_ready:
+            self.pending_data.append(data)
+            print(f"  [Q] Queued data packet (central not ready, queue={len(self.pending_data)})")
+            return
+        self._forward_data(data)
+
+    def _forward_data(self, data: str):
+        """Parse and transmit a data message to BLE peripheral."""
         event_hex, body_hex = data.split(":", 1)
         body = bytes.fromhex(body_hex)
         if len(body) < 2:
@@ -287,6 +297,12 @@ class RelayCentral:
 
         self.central_ready = True
         print("[+] Connected to real peripheral! Relay active.")
+
+        # Replay queued data packets that arrived before connection was ready
+        if self.pending_data:
+            print(f"[*] Replaying {len(self.pending_data)} queued packets...")
+            while self.pending_data:
+                self._forward_data(self.pending_data.popleft())
 
     def _relay_loop(self):
         """Main BLE receive and forward loop."""
