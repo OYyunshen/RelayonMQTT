@@ -55,6 +55,7 @@ class RelayPeripheral:
         self.adv_mac_bytes = None
         self.got_adv = False
         self.got_rsp = False
+        self.peripheral_ready = False
         self.hw_lock = threading.Lock()
 
     def run(self):
@@ -75,6 +76,7 @@ class RelayPeripheral:
         print(f"[*] Connecting to MQTT broker {self.args.broker}:{self.args.mqtt_port}...")
         self.mqtt.connect(self.args.broker, self.args.mqtt_port)
         self.mqtt.subscribe(self.args.sub_topic)
+        self.mqtt.subscribe(self.args.sub_topic + "/rsp")
         self.mqtt.loop_start()
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
@@ -83,6 +85,7 @@ class RelayPeripheral:
             if client._sock is not None:
                 client._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             client.subscribe(self.args.sub_topic)
+            client.subscribe(self.args.sub_topic + "/rsp")
         else:
             print(f"[-] MQTT connection failed, code: {rc}")
             sys.exit(1)
@@ -123,7 +126,7 @@ class RelayPeripheral:
 
     def _handle_data_message(self, data: str):
         """Forward data from device-side relay to BLE."""
-        if self.hw is None:
+        if self.hw is None or not self.peripheral_ready:
             return
         event_hex, body_hex = data.split(":", 1)
         body = bytes.fromhex(body_hex)
@@ -206,6 +209,7 @@ class RelayPeripheral:
             self.hw.decoder_state.last_chan = -1
             if dpkt.pdutype == "CONNECT_IND":
                 self._publish(f"con:{dpkt.body.hex()}")
+                self.peripheral_ready = True
                 print(f"[+] Central connected! Forwarding CONNECT_IND to device-side")
             pdu_type = 0
 

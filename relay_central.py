@@ -82,6 +82,7 @@ class RelayCentral:
         self.target_adva = Advertiser()
         self.conn_req = None
         self.is_connected = False
+        self.central_ready = False
         self.cur_aa = 0
         self.mac_bytes = [int(h, 16) for h in reversed(args.target.split(":"))]
         self.hw_lock = threading.Lock()
@@ -201,7 +202,7 @@ class RelayCentral:
 
     def _handle_data_message(self, data: str):
         """Forward data from phone-side relay to BLE peripheral."""
-        if self.hw is None:
+        if self.hw is None or not self.central_ready:
             return
         event_hex, body_hex = data.split(":", 1)
         body = bytes.fromhex(body_hex)
@@ -238,7 +239,7 @@ class RelayCentral:
             qos=1, retain=True
         )
         self.mqtt.publish(
-            self.args.pub_topic, f"rsp:{rsp_body}".encode(),
+            self.args.pub_topic + "/rsp", f"rsp:{rsp_body}".encode(),
             qos=1, retain=True
         )
         print("[+] Published ADV + SCAN_RSP to MQTT (retained)")
@@ -282,7 +283,9 @@ class RelayCentral:
 
         # Clear retained messages now that connection is established
         self.mqtt.publish(self.args.pub_topic, b"", qos=1, retain=True)
+        self.mqtt.publish(self.args.pub_topic + "/rsp", b"", qos=1, retain=True)
 
+        self.central_ready = True
         print("[+] Connected to real peripheral! Relay active.")
 
     def _relay_loop(self):
