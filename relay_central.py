@@ -267,7 +267,7 @@ class RelayCentral:
         # Reconfigure hardware for connection initiation
         self.hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
         self.hw.cmd_pause_done(True)
-        self.hw.cmd_follow(False)
+        self.hw.cmd_follow(True)
         self.hw.cmd_rssi(-128)
         self.hw.cmd_mac(self.mac_bytes, False)
         self.hw.cmd_auxadv(False)
