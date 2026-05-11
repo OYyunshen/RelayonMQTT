@@ -230,9 +230,9 @@ class RelayCentral:
             return
 
         with self.hw_lock:
-            self.hw.cmd_transmit(llid, pdu, event)
+            self.hw.cmd_transmit(llid, pdu)
         if not self.args.quiet:
-            print(f"  >> BLE TX: LLID={llid} len={len(pdu)} event={event}")
+            print(f"  >> BLE TX: LLID={llid} len={len(pdu)}")
 
     def _publish(self, payload: str):
         """Publish message to the phone-side relay."""
