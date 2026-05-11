@@ -158,9 +158,17 @@ class RelayPeripheral:
         llid = body[0] & 3
         pdu = body[2:]
 
-        # Filter out LL control PDUs with instants that may have expired
+        # Filter out LL control PDUs that are unsafe to relay:
+        # 0x00: LL_CONNECTION_UPDATE_IND (has instant)
+        # 0x01: LL_CHANNEL_MAP_IND (has instant)
+        # 0x14: LL_LENGTH_REQ (DLE negotiation, would cause size mismatch)
+        # 0x15: LL_LENGTH_RSP
+        # 0x16: LL_PHY_REQ (PHY negotiation, would cause PHY mismatch)
+        # 0x17: LL_PHY_RSP
+        # 0x18: LL_PHY_UPDATE_IND (has instant)
         pkt = DPacketMessage.from_body(body, True)
-        if isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]:
+        if isinstance(pkt, LlControlMessage) and pkt.opcode in [
+                0x00, 0x01, 0x14, 0x15, 0x16, 0x17, 0x18]:
             if not self.args.quiet:
                 print(f"  >> Filtered LL control with instant (opcode=0x{pkt.opcode:02x})")
             return

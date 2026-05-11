@@ -222,9 +222,17 @@ class RelayCentral:
         llid = body[0] & 3
         pdu = body[2:]
 
-        # Filter out LL control PDUs with instants that may have expired
+        # Filter out LL control PDUs that are unsafe to relay:
+        # 0x00: LL_CONNECTION_UPDATE_IND (has instant)
+        # 0x01: LL_CHANNEL_MAP_IND (has instant)
+        # 0x14: LL_LENGTH_REQ (DLE negotiation, would cause size mismatch)
+        # 0x15: LL_LENGTH_RSP
+        # 0x16: LL_PHY_REQ (PHY negotiation, would cause PHY mismatch)
+        # 0x17: LL_PHY_RSP
+        # 0x18: LL_PHY_UPDATE_IND (has instant)
         pkt = DPacketMessage.from_body(body, True)
-        if isinstance(pkt, LlControlMessage) and pkt.opcode in [0x00, 0x01, 0x18]:
+        if isinstance(pkt, LlControlMessage) and pkt.opcode in [
+                0x00, 0x01, 0x14, 0x15, 0x16, 0x17, 0x18]:
             if not self.args.quiet:
                 print(f"  >> Filtered LL control with instant (opcode=0x{pkt.opcode:02x})")
             return
@@ -277,12 +285,12 @@ class RelayCentral:
         self.hw.mark_and_flush()
 
         # Initiate connection using parameters from the relayed CONNECT_IND
-        # Use a large supervision timeout (5s) to tolerate MQTT relay latency
+        # Use max BLE supervision timeout (32s) to tolerate MQTT relay latency
         targ_random = bool(self.target_adva.adv.TxAdd)
         self.hw.initiate_conn(
             self.mac_bytes, targ_random,
             self.conn_req.Interval, self.conn_req.Latency,
-            timeout=500
+            timeout=3200
         )
 
         # Wait for connection establishment

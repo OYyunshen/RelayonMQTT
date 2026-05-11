@@ -509,7 +509,7 @@ class SniffleHW:
             self.cmd_scan()
 
     # Initiate a connection to a peer, with sane auto-generated LLData
-    def initiate_conn(self, peerAddr, is_random=True, interval=24, latency=1, timeout=500):
+    def initiate_conn(self, peerAddr, is_random=True, interval=24, latency=1, timeout=3200):
         llData = []
 
         # access address
