@@ -509,7 +509,7 @@ class SniffleHW:
             self.cmd_scan()
 
     # Initiate a connection to a peer, with sane auto-generated LLData
-    def initiate_conn(self, peerAddr, is_random=True, interval=24, latency=1):
+    def initiate_conn(self, peerAddr, is_random=True, interval=24, latency=1, timeout=500):
         llData = []
 
         # access address
@@ -523,7 +523,7 @@ class SniffleHW:
         llData.extend(pack("<H", randint(5, 15)))
         llData.extend(pack("<H", interval))
         llData.extend(pack("<H", latency))
-        llData.extend(pack("<H", 50))
+        llData.extend(pack("<H", timeout))
 
         # Channel Map
         llData.extend([0xFF, 0xFF, 0xFF, 0xFF, 0x1F])

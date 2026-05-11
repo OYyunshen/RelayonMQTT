@@ -277,10 +277,12 @@ class RelayCentral:
         self.hw.mark_and_flush()
 
         # Initiate connection using parameters from the relayed CONNECT_IND
+        # Use a large supervision timeout (5s) to tolerate MQTT relay latency
         targ_random = bool(self.target_adva.adv.TxAdd)
         self.hw.initiate_conn(
             self.mac_bytes, targ_random,
-            self.conn_req.Interval, self.conn_req.Latency
+            self.conn_req.Interval, self.conn_req.Latency,
+            timeout=500
         )
 
         # Wait for connection establishment
