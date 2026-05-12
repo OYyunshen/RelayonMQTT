@@ -24,6 +24,7 @@ import socket
 import sys
 import time
 import threading
+import queue
 from collections import deque
 
 from paho.mqtt import client as mqtt_client
@@ -32,7 +33,7 @@ from paho.mqtt.enums import CallbackAPIVersion
 from sniffle.sniffle_hw import SniffleHW, BLE_ADV_AA, SnifferMode
 from sniffle.packet_decoder import (
     PacketMessage, DPacketMessage, DataMessage, LlDataContMessage,
-    ConnectIndMessage, LlControlMessage
+    ConnectIndMessage
 )
 from sniffle.sniffer_state import StateMessage, SnifferState
 from sniffle.measurements import MeasurementMessage
@@ -57,8 +58,7 @@ class RelayPeripheral:
         self.got_adv = False
         self.got_rsp = False
         self.peripheral_ready = False
-        self.pending_data = deque()
-        self.hw_lock = threading.Lock()
+        self.tx_queue = queue.Queue()
 
     def run(self):
         """Main entry point."""
@@ -140,13 +140,8 @@ class RelayPeripheral:
         print(f"[+] Received SCAN_RSP data ({len(self.scan_rsp_data)} bytes)")
 
     def _handle_data_message(self, data: str):
-        """Forward data from device-side relay to BLE."""
-        if self.hw is None:
-            return
-        if not self.peripheral_ready:
-            self.pending_data.append(data)
-            return
-        self._forward_data(data)
+        """Queue data from device-side relay for BLE transmission."""
+        self.tx_queue.put(data)
 
     def _forward_data(self, data: str):
         """Parse and transmit a data message to BLE."""
@@ -158,23 +153,7 @@ class RelayPeripheral:
         llid = body[0] & 3
         pdu = body[2:]
 
-        # Filter out LL control PDUs that are unsafe to relay:
-        # 0x00: LL_CONNECTION_UPDATE_IND (has instant)
-        # 0x01: LL_CHANNEL_MAP_IND (has instant)
-        # 0x14: LL_LENGTH_REQ (DLE negotiation, would cause size mismatch)
-        # 0x15: LL_LENGTH_RSP
-        # 0x16: LL_PHY_REQ (PHY negotiation, would cause PHY mismatch)
-        # 0x17: LL_PHY_RSP
-        # 0x18: LL_PHY_UPDATE_IND (has instant)
-        pkt = DPacketMessage.from_body(body, True)
-        if isinstance(pkt, LlControlMessage) and pkt.opcode in [
-                0x00, 0x01, 0x14, 0x15, 0x16, 0x17, 0x18]:
-            if not self.args.quiet:
-                print(f"  >> Filtered LL control with instant (opcode=0x{pkt.opcode:02x})")
-            return
-
-        with self.hw_lock:
-            self.hw.cmd_transmit(llid, pdu)
+        self.hw.cmd_transmit(llid, pdu, event)
         if not self.args.quiet:
             print(f"  >> BLE TX: LLID={llid} len={len(pdu)}")
 
@@ -213,11 +192,26 @@ class RelayPeripheral:
         print("[+] Advertising as cloned peripheral, waiting for central to connect...")
 
     def _relay_loop(self):
-        """Main BLE receive and forward loop."""
+        """Main BLE receive and forward loop.
+        
+        All serial port access happens in this single thread:
+        - recv_and_decode() reads from serial
+        - cmd_transmit() writes to serial (via tx_queue draining)
+        This eliminates the threading race condition that caused
+        'Ignoring message due to missing CRLF' errors.
+        """
         while True:
             try:
-                with self.hw_lock:
-                    msg = self.hw.recv_and_decode()
+                # Drain pending TX queue (from MQTT callback thread)
+                while not self.tx_queue.empty():
+                    try:
+                        data = self.tx_queue.get_nowait()
+                        if self.peripheral_ready:
+                            self._forward_data(data)
+                    except queue.Empty:
+                        break
+
+                msg = self.hw.recv_and_decode()
                 if isinstance(msg, PacketMessage):
                     self._process_packet(msg)
                 elif isinstance(msg, StateMessage):
@@ -241,11 +235,6 @@ class RelayPeripheral:
                 self._publish(f"con:{dpkt.body.hex()}")
                 self.peripheral_ready = True
                 print(f"[+] Central connected! Forwarding CONNECT_IND to device-side")
-                # Replay queued data packets
-                if self.pending_data:
-                    print(f"[*] Replaying {len(self.pending_data)} queued packets...")
-                    while self.pending_data:
-                        self._forward_data(self.pending_data.popleft())
             pdu_type = 0
 
         elif isinstance(dpkt, DataMessage):
