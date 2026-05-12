@@ -223,20 +223,26 @@ class RelayCentral:
         self.mqtt.publish(self.args.pub_topic, payload.encode(), qos=0)
 
     def _publish_advertisement(self):
-        """Send captured advertisement data to phone-side relay."""
-        # Use retain=True so the phone-side relay can receive even if it starts later
+        """Periodically send captured advertisement data to phone-side relay.
+        
+        Publishes ADV and SCAN_RSP every second until a connection is established.
+        This replaces the retained message approach, avoiding stale data issues
+        and removing startup order dependency.
+        """
         adv_body = self.target_adva.adv.body.hex()
         rsp_body = self.target_adva.scan_rsp.body.hex()
+        adv_payload = f"adv:{adv_body}".encode()
+        rsp_payload = f"rsp:{rsp_body}".encode()
 
-        self.mqtt.publish(
-            self.args.pub_topic, f"adv:{adv_body}".encode(),
-            qos=1, retain=True
-        )
-        self.mqtt.publish(
-            self.args.pub_topic + "/rsp", f"rsp:{rsp_body}".encode(),
-            qos=1, retain=True
-        )
-        print("[+] Published ADV + SCAN_RSP to MQTT (retained)")
+        def _adv_loop():
+            while not self.is_connected:
+                self.mqtt.publish(self.args.pub_topic, adv_payload, qos=0)
+                self.mqtt.publish(self.args.pub_topic + "/rsp", rsp_payload, qos=0)
+                time.sleep(1)
+
+        self._adv_thread = threading.Thread(target=_adv_loop, daemon=True)
+        self._adv_thread.start()
+        print("[+] Publishing ADV + SCAN_RSP periodically (every 1s)")
         print("[*] Waiting for phone-side relay to receive connection...")
 
     def _wait_for_connection(self):
